@@ -1,0 +1,18 @@
+[package]
+name = "blocker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+kiss3d = "0.40"
+pollster = "0.4"
+rustc-hash = "2.0"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+insta = "1.40"
+
+[[bench]]
+name = "solver"
+harness = false

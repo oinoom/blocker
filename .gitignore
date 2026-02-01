@@ -1,0 +1,9 @@
+# Build artifacts
+/target/
+
+# Generated solution files
+solutions.bin
+solutions.txt
+
+# Site assets (copied to blog repo)
+/site/

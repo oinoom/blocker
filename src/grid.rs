@@ -1,163 +1,142 @@
-//! Grid representation and operations for the 3x3x3 puzzle cube.
+//! Grid representation and operations for cube packing puzzles.
 //!
-//! The grid can be represented in two ways:
-//! - `PieceGrid`: A 3D array where each cell contains a piece number (1-7) or 0 for empty
-//! - `GridKey`: A flattened 27-byte array for efficient hashing and comparison
+//! Generic over grid dimension (`DIM`) and total cell count (`GRID_SIZE = DIM^3`).
+//! The grid is represented as a flat array where each cell contains a piece
+//! number (1-based) or 0 for empty.
 
-use crate::pieces::{Coord, PlacedPiece, CHIRAL_PAIR};
-
-/// 3D grid where each cell contains a piece number (1-7) or 0 for empty.
-pub type PieceGrid = [[[u8; 3]; 3]; 3];
-
-/// Flattened 27-byte grid representation for hashing and comparison.
-pub type GridKey = [u8; 27];
-
-/// Number of cells in the 3x3x3 grid.
-const GRID_SIZE: usize = 27;
-/// Number of cells along one axis.
-const GRID_DIM: usize = 3;
+use crate::pieces::{Coord, PlacedPiece, Puzzle};
 
 /// Number of distinct cube orientations.
 const NUM_ROTATIONS: usize = 24;
 
-/// Pre-computed lookup table for rotating grid indices.
+/// Builds the rotation lookup table at compile time for any grid dimension.
 ///
-/// `ROTATION_TABLE[rotation_index][source_cell]` gives the destination cell
-/// index after applying the rotation around the grid center (1,1,1).
+/// For each of the 24 rotations and each cell, computes where that cell ends up
+/// after rotating the grid around its center point.
 ///
-/// The rotation index ordering matches `geometry::ROTATIONS`.
-static ROTATION_TABLE: [[u8; GRID_SIZE]; NUM_ROTATIONS] = build_rotation_table();
-
-/// Builds the rotation lookup table at compile time.
-///
-/// For each of the 24 rotations and each of the 27 cells, computes where
-/// that cell ends up after rotating the grid around its center point.
-const fn build_rotation_table() -> [[u8; GRID_SIZE]; NUM_ROTATIONS] {
+/// Uses doubled coordinates to handle both odd (3x3x3) and even (4x4x4) grids
+/// without floating point: center_doubled = DIM - 1.
+const fn build_rotation_table<const DIM: usize, const GRID_SIZE: usize>(
+) -> [[u8; GRID_SIZE]; NUM_ROTATIONS] {
     let mut table = [[0u8; GRID_SIZE]; NUM_ROTATIONS];
+    let dim_m1 = DIM as i32 - 1;
 
-    let mut rotation_index = 0;
-    while rotation_index < NUM_ROTATIONS {
-        let mut source_cell = 0;
-        while source_cell < GRID_SIZE {
-            // convert cell index to centered coordinates (-1 to 1)
-            let centered_x = (source_cell / 9) as i32 - 1;
-            let centered_y = ((source_cell / 3) % 3) as i32 - 1;
-            let centered_z = (source_cell % 3) as i32 - 1;
+    let mut rot = 0;
+    while rot < NUM_ROTATIONS {
+        let mut src = 0;
+        while src < GRID_SIZE {
+            let x = (src / (DIM * DIM)) as i32;
+            let y = ((src / DIM) % DIM) as i32;
+            let z = (src % DIM) as i32;
 
-            // apply the rotation (same formulas as geometry::ROTATIONS)
-            let (rotated_x, rotated_y, rotated_z) = match rotation_index {
-                0 => (centered_x, centered_y, centered_z),
-                1 => (-centered_y, centered_x, centered_z),
-                2 => (-centered_x, -centered_y, centered_z),
-                3 => (centered_y, -centered_x, centered_z),
-                4 => (centered_x, -centered_z, centered_y),
-                5 => (centered_z, centered_x, centered_y),
-                6 => (-centered_x, centered_z, centered_y),
-                7 => (-centered_z, -centered_x, centered_y),
-                8 => (centered_x, -centered_y, -centered_z),
-                9 => (centered_y, centered_x, -centered_z),
-                10 => (-centered_x, centered_y, -centered_z),
-                11 => (-centered_y, -centered_x, -centered_z),
-                12 => (centered_x, centered_z, -centered_y),
-                13 => (-centered_z, centered_x, -centered_y),
-                14 => (-centered_x, -centered_z, -centered_y),
-                15 => (centered_z, -centered_x, -centered_y),
-                16 => (centered_z, centered_y, -centered_x),
-                17 => (-centered_y, centered_z, -centered_x),
-                18 => (-centered_z, -centered_y, -centered_x),
-                19 => (centered_y, -centered_z, -centered_x),
-                20 => (-centered_z, centered_y, centered_x),
-                21 => (-centered_y, -centered_z, centered_x),
-                22 => (centered_z, -centered_y, centered_x),
-                _ => (centered_y, centered_z, centered_x),
+            // doubled centered coordinates: avoids half-integer centers for even DIM
+            let cx = 2 * x - dim_m1;
+            let cy = 2 * y - dim_m1;
+            let cz = 2 * z - dim_m1;
+
+            // apply rotation (same formulas as geometry::ROTATIONS, on doubled coords)
+            let (rx, ry, rz) = match rot {
+                0 => (cx, cy, cz),
+                1 => (-cy, cx, cz),
+                2 => (-cx, -cy, cz),
+                3 => (cy, -cx, cz),
+                4 => (cx, -cz, cy),
+                5 => (cz, cx, cy),
+                6 => (-cx, cz, cy),
+                7 => (-cz, -cx, cy),
+                8 => (cx, -cy, -cz),
+                9 => (cy, cx, -cz),
+                10 => (-cx, cy, -cz),
+                11 => (-cy, -cx, -cz),
+                12 => (cx, cz, -cy),
+                13 => (-cz, cx, -cy),
+                14 => (-cx, -cz, -cy),
+                15 => (cz, -cx, -cy),
+                16 => (cz, cy, -cx),
+                17 => (-cy, cz, -cx),
+                18 => (-cz, -cy, -cx),
+                19 => (cy, -cz, -cx),
+                20 => (-cz, cy, cx),
+                21 => (-cy, -cz, cx),
+                22 => (cz, -cy, cx),
+                _ => (cy, cz, cx),
             };
 
-            // convert back to cell index (shift from -1..1 to 0..2)
-            let dest_x = (rotated_x + 1) as usize;
-            let dest_y = (rotated_y + 1) as usize;
-            let dest_z = (rotated_z + 1) as usize;
-            let dest_cell = dest_x * 9 + dest_y * 3 + dest_z;
+            // convert back from doubled coords to grid indices
+            let dx = ((rx + dim_m1) / 2) as usize;
+            let dy = ((ry + dim_m1) / 2) as usize;
+            let dz = ((rz + dim_m1) / 2) as usize;
+            let dest = dx * DIM * DIM + dy * DIM + dz;
 
-            table[rotation_index][source_cell] = dest_cell as u8;
-            source_cell += 1;
+            table[rot][src] = dest as u8;
+            src += 1;
         }
-        rotation_index += 1;
+        rot += 1;
     }
     table
 }
 
-/// Converts (x, y, z) coordinates to a linear cell index (0-26).
+/// Converts (x, y, z) coordinates to a linear cell index.
 ///
-/// Index order is x-major, then y, then z: `idx = x*9 + y*3 + z`.
+/// Index order is x-major: `idx = x * DIM * DIM + y * DIM + z`.
 #[inline(always)]
-pub const fn coord_to_idx(x: i32, y: i32, z: i32) -> usize {
-    (x * 9 + y * 3 + z) as usize
+pub const fn coord_to_idx<const DIM: usize>(x: i32, y: i32, z: i32) -> usize {
+    (x as usize) * DIM * DIM + (y as usize) * DIM + (z as usize)
 }
 
-/// Converts a linear cell index (0-26) to (x, y, z) coordinates.
-///
-/// This is the inverse of `coord_to_idx` and uses the same x-major ordering.
+/// Converts a linear cell index to (x, y, z) coordinates.
 #[inline(always)]
-pub const fn idx_to_coord(cell_index: usize) -> Coord {
+pub const fn idx_to_coord<const DIM: usize>(cell_index: usize) -> Coord {
     (
-        (cell_index / 9) as i32,
-        ((cell_index / 3) % 3) as i32,
-        (cell_index % 3) as i32,
+        (cell_index / (DIM * DIM)) as i32,
+        ((cell_index / DIM) % DIM) as i32,
+        (cell_index % DIM) as i32,
     )
 }
 
-/// Converts a solution (list of placed pieces) to a 3D grid.
-pub fn solution_to_grid(solution: &[PlacedPiece]) -> PieceGrid {
-    let mut grid = [[[0u8; 3]; 3]; 3];
+/// Converts a solution (list of placed pieces) to a flat grid.
+///
+/// Each cell contains a 1-based piece number, or 0 for empty.
+pub fn solution_to_grid<const DIM: usize, const GRID_SIZE: usize>(
+    solution: &[PlacedPiece],
+) -> [u8; GRID_SIZE] {
+    let mut grid = [0u8; GRID_SIZE];
 
-    for &(piece_index, cube_positions, cube_count) in solution {
-        let piece_number = (piece_index + 1) as u8;
-        for &(x, y, z) in &cube_positions[..cube_count as usize] {
-            grid[x as usize][y as usize][z as usize] = piece_number;
+    for placed in solution {
+        let piece_number = (placed.piece_index + 1) as u8;
+        for &(x, y, z) in placed.cubes() {
+            grid[coord_to_idx::<DIM>(x, y, z)] = piece_number;
         }
     }
 
     grid
 }
 
-/// Flattens a 3D grid to a 1D key array.
-///
-/// The flattening order matches `coord_to_idx` (x-major, then y, then z).
-#[inline]
-pub fn grid_to_key(grid: &PieceGrid) -> GridKey {
-    let mut key = [0u8; GRID_SIZE];
-
-    for (x, yz_plane) in grid.iter().enumerate() {
-        for (y, z_row) in yz_plane.iter().enumerate() {
-            for (z, &piece_number) in z_row.iter().enumerate() {
-                key[x * 9 + y * 3 + z] = piece_number;
-            }
-        }
-    }
-
-    key
-}
-
 /// Computes the canonical form of a solution under rotations and reflections.
 ///
-/// Reflections swap the chiral pair, so the reflected key is normalized by
-/// exchanging those piece IDs before comparison.
+/// Reflections may swap a chiral pair, so the reflected key is normalized by
+/// exchanging those piece IDs before comparison when a pair is provided.
 #[inline]
-pub fn canonical_key(solution: &[PlacedPiece]) -> GridKey {
-    let grid_key = grid_to_key(&solution_to_grid(solution));
-    find_smallest_rotation_with_reflection(&grid_key)
+pub fn canonical_key<const DIM: usize, const GRID_SIZE: usize>(
+    solution: &[PlacedPiece],
+    chiral_pair: Option<(usize, usize)>,
+) -> [u8; GRID_SIZE] {
+    let grid_key = solution_to_grid::<DIM, GRID_SIZE>(solution);
+    find_smallest_rotation_with_reflection::<DIM, GRID_SIZE>(&grid_key, chiral_pair)
 }
 
-/// Reflects a grid key across the x-axis (mirror through plane x=1).
+/// Reflects a grid key across the x-axis (mirror through the yz center plane).
 #[inline]
-fn reflect_key_x(original: &GridKey) -> GridKey {
+fn reflect_key_x<const DIM: usize, const GRID_SIZE: usize>(
+    original: &[u8; GRID_SIZE],
+) -> [u8; GRID_SIZE] {
     let mut reflected = [0u8; GRID_SIZE];
 
-    for x in 0..GRID_DIM {
-        for y in 0..GRID_DIM {
-            for z in 0..GRID_DIM {
-                let source = x * 9 + y * 3 + z;
-                let dest = (GRID_DIM - 1 - x) * 9 + y * 3 + z;
+    for x in 0..DIM {
+        for y in 0..DIM {
+            for z in 0..DIM {
+                let source = x * DIM * DIM + y * DIM + z;
+                let dest = (DIM - 1 - x) * DIM * DIM + y * DIM + z;
                 reflected[dest] = original[source];
             }
         }
@@ -168,10 +147,13 @@ fn reflect_key_x(original: &GridKey) -> GridKey {
 
 /// Swaps the chiral pair IDs in a grid key.
 #[inline]
-fn swap_chiral_in_key(original: &GridKey) -> GridKey {
+fn swap_chiral_in_key<const GRID_SIZE: usize>(
+    original: &[u8; GRID_SIZE],
+    chiral_pair: (usize, usize),
+) -> [u8; GRID_SIZE] {
     let mut swapped = *original;
-    let first = (CHIRAL_PAIR.0 + 1) as u8;
-    let second = (CHIRAL_PAIR.1 + 1) as u8;
+    let first = (chiral_pair.0 + 1) as u8;
+    let second = (chiral_pair.1 + 1) as u8;
 
     for cell in &mut swapped {
         if *cell == first {
@@ -186,14 +168,18 @@ fn swap_chiral_in_key(original: &GridKey) -> GridKey {
 
 /// Finds the lexicographically smallest rotation of a grid key.
 #[inline]
-fn find_smallest_rotation(original: &GridKey) -> GridKey {
+fn find_smallest_rotation<const DIM: usize, const GRID_SIZE: usize>(
+    original: &[u8; GRID_SIZE],
+) -> [u8; GRID_SIZE] {
+    let table: &[[u8; GRID_SIZE]; NUM_ROTATIONS] =
+        &const { build_rotation_table::<DIM, GRID_SIZE>() };
     let mut smallest = *original;
 
-    // try all rotations except identity (index 0, which is the original)
-    for rotation_mapping in &ROTATION_TABLE[1..] {
+    // try all rotations except identity (index 0)
+    for rotation_mapping in &table[1..] {
         let mut rotated = [0u8; GRID_SIZE];
 
-        // apply rotation: value at source goes to destination
+        // move each source cell value into its rotated destination
         for (source_cell, &dest_cell) in rotation_mapping.iter().enumerate() {
             rotated[dest_cell as usize] = original[source_cell];
         }
@@ -208,12 +194,19 @@ fn find_smallest_rotation(original: &GridKey) -> GridKey {
 
 /// Finds the lexicographically smallest symmetry among rotations and reflections.
 #[inline]
-fn find_smallest_rotation_with_reflection(original: &GridKey) -> GridKey {
-    let mut smallest = find_smallest_rotation(original);
+fn find_smallest_rotation_with_reflection<const DIM: usize, const GRID_SIZE: usize>(
+    original: &[u8; GRID_SIZE],
+    chiral_pair: Option<(usize, usize)>,
+) -> [u8; GRID_SIZE] {
+    let mut smallest = find_smallest_rotation::<DIM, GRID_SIZE>(original);
 
-    let reflected = reflect_key_x(original);
-    let reflected = swap_chiral_in_key(&reflected);
-    let reflected_smallest = find_smallest_rotation(&reflected);
+    // compare raw shape symmetries against reflected symmetries
+    let mut reflected = reflect_key_x::<DIM, GRID_SIZE>(original);
+    if let Some(pair) = chiral_pair {
+        // normalize mirrored chiral pieces before comparing keys
+        reflected = swap_chiral_in_key(&reflected, pair);
+    }
+    let reflected_smallest = find_smallest_rotation::<DIM, GRID_SIZE>(&reflected);
 
     if reflected_smallest < smallest {
         smallest = reflected_smallest;
@@ -224,32 +217,42 @@ fn find_smallest_rotation_with_reflection(original: &GridKey) -> GridKey {
 
 /// Formats a solution as a human-readable string.
 ///
-/// Displays three z-slices side by side, with piece numbers 1-7.
-/// Empty cells (which shouldn't exist in a complete solution) show as '.'.
-///
-/// Layout details:
-/// - Each output row corresponds to a fixed `y` level (printed from 2 down to 0).
-/// - Each row prints `z=0`, `z=1`, `z=2` slices left to right.
-/// - Within a slice, `x` increases left to right.
-pub fn format_solution(solution: &[PlacedPiece]) -> String {
-    let grid = solution_to_grid(solution);
+/// Displays DIM z-slices side by side, with piece numbers.
+/// Empty cells show as '.'.
+pub fn format_solution<const DIM: usize, const GRID_SIZE: usize>(
+    solution: &[PlacedPiece],
+) -> String {
+    let grid = solution_to_grid::<DIM, GRID_SIZE>(solution);
 
-    let mut output = String::from("  z=0     z=1     z=2\n");
+    // header: z=0, z=1, ..., z=DIM-1
+    let mut output = String::new();
+    for z in 0..DIM {
+        if z > 0 {
+            // padding between slices: DIM chars for the slice content, plus separator
+            output.push_str("  ");
+        }
+        output.push_str(&format!("z={:<width$}", z, width = DIM));
+    }
+    output.push('\n');
 
-    // Print rows from top (y=2) to bottom (y=0)
-    for y in (0..3).rev() {
-        // Print all three z-slices for this y row
-        for z in 0..3 {
-            for x_plane in &grid {
-                let piece_number = x_plane[y][z];
+    // rows from top (y=DIM-1) to bottom (y=0)
+    for y in (0..DIM).rev() {
+        for z in 0..DIM {
+            if z > 0 {
+                output.push_str("  ");
+            }
+            for x in 0..DIM {
+                let piece_number = grid[x * DIM * DIM + y * DIM + z];
                 let display_char = if piece_number == 0 {
                     '.'
-                } else {
+                } else if piece_number < 10 {
                     char::from(b'0' + piece_number)
+                } else {
+                    // hex for piece numbers >= 10
+                    char::from(b'A' + piece_number - 10)
                 };
                 output.push(display_char);
             }
-            output.push_str("  ");
         }
         output.push('\n');
     }
@@ -257,29 +260,88 @@ pub fn format_solution(solution: &[PlacedPiece]) -> String {
     output
 }
 
+impl<const DIM: usize, const GRID_SIZE: usize, const NUM_PIECES: usize>
+    Puzzle<DIM, GRID_SIZE, NUM_PIECES>
+{
+    /// Computes the canonical key for a solution, using this puzzle's chiral pair.
+    pub fn canonical_key(&self, solution: &[PlacedPiece]) -> [u8; GRID_SIZE] {
+        canonical_key::<DIM, GRID_SIZE>(solution, self.chiral_pair)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_identity_rotation_is_unchanged() {
-        for cell in 0..GRID_SIZE {
+    fn test_identity_rotation_is_unchanged_3x3x3() {
+        let table = const { build_rotation_table::<3, 27>() };
+        for cell in 0..27 {
             assert_eq!(
-                ROTATION_TABLE[0][cell], cell as u8,
+                table[0][cell], cell as u8,
                 "Identity rotation should not move cell {cell}"
             );
         }
     }
 
     #[test]
-    fn test_coordinate_conversion_roundtrip() {
-        for original_index in 0..GRID_SIZE {
-            let (x, y, z) = idx_to_coord(original_index);
-            let recovered_index = coord_to_idx(x, y, z);
+    fn test_identity_rotation_is_unchanged_4x4x4() {
+        let table = const { build_rotation_table::<4, 64>() };
+        for cell in 0..64 {
             assert_eq!(
-                recovered_index, original_index,
-                "Roundtrip failed for index {original_index}"
+                table[0][cell], cell as u8,
+                "Identity rotation should not move cell {cell}"
             );
+        }
+    }
+
+    #[test]
+    fn test_rotations_are_permutations_3x3x3() {
+        let table = const { build_rotation_table::<3, 27>() };
+        for rot in 0..NUM_ROTATIONS {
+            let mut seen = [false; 27];
+            for src in 0..27 {
+                let dest = table[rot][src] as usize;
+                assert!(dest < 27, "Rotation {rot} maps cell {src} to out-of-bounds {dest}");
+                assert!(!seen[dest], "Rotation {rot} maps two cells to {dest}");
+                seen[dest] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn test_rotations_are_permutations_4x4x4() {
+        let table = const { build_rotation_table::<4, 64>() };
+        for rot in 0..NUM_ROTATIONS {
+            let mut seen = [false; 64];
+            for src in 0..64 {
+                let dest = table[rot][src] as usize;
+                assert!(dest < 64, "Rotation {rot} maps cell {src} to out-of-bounds {dest}");
+                assert!(!seen[dest], "Rotation {rot} maps two cells to {dest}");
+                seen[dest] = true;
+            }
+        }
+    }
+
+    #[test]
+    fn test_coordinate_conversion_roundtrip_3x3x3() {
+        for idx in 0..27 {
+            let (x, y, z) = idx_to_coord::<3>(idx);
+            let recovered = coord_to_idx::<3>(x, y, z);
+            assert_eq!(recovered, idx, "Roundtrip failed for index {idx}");
+        }
+    }
+
+    #[test]
+    fn test_coordinate_conversion_roundtrip_4x4x4() {
+        for idx in 0..64 {
+            let (x, y, z) = idx_to_coord::<4>(idx);
+            assert!(
+                (x as usize) < 4 && (y as usize) < 4 && (z as usize) < 4,
+                "idx_to_coord::<4>({idx}) produced out-of-range ({x},{y},{z})"
+            );
+            let recovered = coord_to_idx::<4>(x, y, z);
+            assert_eq!(recovered, idx, "Roundtrip failed for index {idx}");
         }
     }
 }

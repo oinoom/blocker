@@ -2,14 +2,19 @@
 
 <img width="440" height="348" alt="Screenshot 2026-02-01 at 5 41 21 PM" src="https://github.com/user-attachments/assets/815c9283-1949-423e-a718-6d39c697da65" />
 
-Blocker is a Rust solver and viewer for the Soma cube, a 3x3x3 packing puzzle
-made from seven polycubes. It enumerates all unique solutions (240 when
-rotations and reflections are treated as equivalent) and can render them in an
-interactive 3D viewer.
+Blocker is a Rust solver and viewer for cube packing puzzles. It enumerates all
+unique solutions (treating rotations and reflections as equivalent) and can
+render them in an interactive 3D viewer.
+
+Supported puzzles:
+
+- **Soma cube** — 3x3x3 grid, 7 polycubes, 240 unique solutions.
+- **Bedlam cube** — 4x4x4 grid, 13 polycubes.
 
 ## Features
 
-- Backtracking solver with symmetry reduction.
+- Backtracking solver with symmetry reduction and bitmask collision detection.
+- Multiple puzzle definitions with compile-time grid sizing.
 - Interactive desktop viewer powered by kiss3d.
 
 ## Requirements
@@ -19,10 +24,10 @@ interactive 3D viewer.
 
 ## Quick start
 
-- Solve and display all solutions:
+- Solve the Soma cube and open the viewer:
   `cargo run --release`
-- Solve and save solutions to disk:
-  `cargo run --release -- solve`
+- Solve the Bedlam cube (first 5 solutions):
+  `cargo run --release -- -p bedlam -l 5 solve`
 - Display previously saved solutions:
   `cargo run --release -- display`
 - Count saved solutions:
@@ -30,13 +35,20 @@ interactive 3D viewer.
 - Export solutions as JavaScript:
   `cargo run --release -- export-js`
 
-## Commands
+## Usage
 
-All commands are run via:
+```
+cargo run --release -- [OPTIONS] [COMMAND]
+```
 
-`cargo run --release -- <command>`
+### Options
 
-Available commands:
+| Flag | Description |
+|------|-------------|
+| `-p`, `--puzzle <PUZZLE>` | Which puzzle to solve: `soma` (default) or `bedlam`. |
+| `-l`, `--limit <N>` | Stop after finding N solutions. |
+
+### Commands
 
 - `solve`      Solve the puzzle and write solutions to disk.
 - `display`    Display saved solutions in the 3D viewer.

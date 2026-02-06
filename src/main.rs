@@ -1,24 +1,37 @@
 //! Block Puzzle Solver
 //!
-//! Solves a 3x3x3 cube packing puzzle where seven differently-shaped pieces
-//! must be arranged to completely fill the cube. The solver finds all unique
-//! solutions (eliminating rotational and reflection duplicates) and provides an interactive
-//! 3D visualization.
+//! Solves cube packing puzzles where shaped pieces must be arranged to
+//! completely fill a cube. Supports multiple puzzle definitions (Soma 3x3x3,
+//! Bedlam 4x4x4) and provides interactive 3D visualization.
 
 mod visualization;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use blocker::{grid, persistence, pieces, solver};
-use pieces::PIECES;
+use blocker::{pieces, PuzzleOps};
+use pieces::{PlacedPiece, Puzzle, BEDLAM_PUZZLE, SOMA_PUZZLE};
 
-/// Solves a 3x3x3 cube packing puzzle and visualizes the solutions.
+/// Solves cube packing puzzles and visualizes the solutions.
 #[derive(Parser)]
 #[command(name = "blocker")]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    /// Which puzzle to solve.
+    #[arg(long, short, default_value = "soma")]
+    puzzle: PuzzleChoice,
+
+    /// Stop after finding this many solutions.
+    #[arg(long, short)]
+    limit: Option<usize>,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Clone, ValueEnum)]
+enum PuzzleChoice {
+    Soma,
+    Bedlam,
 }
 
 #[derive(Subcommand)]
@@ -33,32 +46,57 @@ enum Command {
     ExportJs,
 }
 
+/// Extends PuzzleOps with 3D visualization (binary-only, not in the library).
+trait PuzzleDisplay: PuzzleOps {
+    fn display_solutions(&self, solutions: Vec<Vec<PlacedPiece>>);
+}
+
+impl<const DIM: usize, const GRID_SIZE: usize, const NUM_PIECES: usize> PuzzleDisplay
+    for Puzzle<DIM, GRID_SIZE, NUM_PIECES>
+{
+    fn display_solutions(&self, solutions: Vec<Vec<PlacedPiece>>) {
+        visualization::display::<DIM, GRID_SIZE>(solutions, self.pieces.len());
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
+    let puzzle: &dyn PuzzleDisplay = match cli.puzzle {
+        PuzzleChoice::Soma => &SOMA_PUZZLE,
+        PuzzleChoice::Bedlam => &BEDLAM_PUZZLE,
+    };
+
+    run_with_puzzle(puzzle, cli.command, cli.limit);
+}
+
+fn run_with_puzzle(
+    puzzle: &dyn PuzzleDisplay,
+    command: Option<Command>,
+    limit: Option<usize>,
+) {
+    match command {
         Some(Command::Solve) => {
-            run_solver();
+            run_solver(puzzle, limit);
         }
-        Some(Command::Display) => run_display(),
-        Some(Command::Count) => run_count(),
-        Some(Command::ExportJs) => run_export_js(),
+        Some(Command::Display) => run_display(puzzle),
+        Some(Command::Count) => run_count(puzzle),
+        Some(Command::ExportJs) => run_export_js(puzzle, limit),
         None => {
-            // default: solve and display
-            let solutions = run_solver();
+            let solutions = run_solver(puzzle, limit);
             if !solutions.is_empty() {
-                println!("Controls: Left/Right navigate, Up/Down explode, R reset");
-                visualization::display(solutions);
+                println!("Controls: Left/Right navigate, W/S explode, R reset");
+                puzzle.display_solutions(solutions);
             }
         }
     }
 }
 
 /// Solves the puzzle, saves to disk, and returns the solutions.
-fn run_solver() -> Vec<Vec<pieces::PlacedPiece>> {
-    let solutions = solver::solve(PIECES);
+fn run_solver(puzzle: &dyn PuzzleDisplay, limit: Option<usize>) -> Vec<Vec<PlacedPiece>> {
+    let solutions = puzzle.solve(limit);
 
-    if let Err(e) = persistence::save(&solutions) {
+    if let Err(e) = puzzle.save_solutions(&solutions) {
         eprintln!("Failed to save solutions: {}", e);
     } else {
         println!("Found {} solutions", solutions.len());
@@ -69,53 +107,46 @@ fn run_solver() -> Vec<Vec<pieces::PlacedPiece>> {
 }
 
 /// Loads and displays saved solutions.
-fn run_display() {
-    match persistence::load_all() {
+fn run_display(puzzle: &dyn PuzzleDisplay) {
+    match puzzle.load_solutions() {
         Some(solutions) => {
             println!("Loaded {} solutions", solutions.len());
-            println!("Controls: Left/Right navigate, Up/Down explode, R reset");
-            visualization::display(solutions);
+            println!("Controls: Left/Right navigate, W/S explode, R reset");
+            puzzle.display_solutions(solutions);
         }
         None => {
-            eprintln!("No solutions.bin found. Run 'blocker solve' first.");
+            eprintln!("No compatible solutions.bin found. Run 'blocker solve' first.");
         }
     }
 }
 
 /// Prints the count of saved solutions.
-fn run_count() {
-    match persistence::count() {
+fn run_count(puzzle: &dyn PuzzleDisplay) {
+    match puzzle.count_solutions() {
         Some(count) => println!("{} solutions", count),
-        None => eprintln!("No solutions.bin found. Run 'blocker solve' first."),
+        None => eprintln!("No compatible solutions.bin found. Run 'blocker solve' first."),
     }
 }
 
 /// Exports solutions as JavaScript array for the website.
-fn run_export_js() {
-    let solutions = solver::solve(PIECES);
+fn run_export_js(puzzle: &dyn PuzzleDisplay, limit: Option<usize>) {
+    let solutions = puzzle.solve(limit);
 
     println!("const SOLUTIONS = [");
     for (i, solution) in solutions.iter().enumerate() {
-        print!("  [");
-        for (j, &(piece_idx, coords, cube_count)) in solution.iter().enumerate() {
-            print!("[{}, [", piece_idx);
-            for (k, &(x, y, z)) in coords[..cube_count as usize].iter().enumerate() {
-                print!("[{},{},{}]", x, y, z);
-                if k < cube_count as usize - 1 {
-                    print!(",");
-                }
-            }
-            print!("]]");
-            if j < solution.len() - 1 {
-                print!(", ");
-            }
-        }
-        print!("]");
-        if i < solutions.len() - 1 {
-            println!(",");
-        } else {
-            println!();
-        }
+        let pieces: Vec<String> = solution
+            .iter()
+            .map(|placed| {
+                let cubes: Vec<String> = placed
+                    .cubes()
+                    .iter()
+                    .map(|&(x, y, z)| format!("[{},{},{}]", x, y, z))
+                    .collect();
+                format!("[{}, [{}]]", placed.piece_index, cubes.join(","))
+            })
+            .collect();
+        let trailing = if i < solutions.len() - 1 { "," } else { "" };
+        println!("  [{}]{}", pieces.join(", "), trailing);
     }
     println!("];");
 }
@@ -126,12 +157,12 @@ mod tests {
 
     #[test]
     fn test_solutions_snapshot() {
-        let solutions = solver::solve(PIECES);
+        let solutions = SOMA_PUZZLE.solve(None);
 
         let mut output = format!("Found {} solutions:\n\n", solutions.len());
         for (i, solution) in solutions.iter().enumerate() {
             output.push_str(&format!("Solution {}:\n", i + 1));
-            output.push_str(&grid::format_solution(solution));
+            output.push_str(&SOMA_PUZZLE.format_solution(solution));
             output.push('\n');
         }
 
@@ -140,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_solution_count() {
-        let solutions = solver::solve(PIECES);
+        let solutions = SOMA_PUZZLE.solve(None);
         assert_eq!(solutions.len(), 240);
     }
 }

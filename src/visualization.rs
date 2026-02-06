@@ -2,22 +2,31 @@
 
 use kiss3d::prelude::*;
 
-use crate::grid::solution_to_grid;
-use crate::pieces::PlacedPiece;
+use blocker::grid::solution_to_grid;
+use blocker::pieces::PlacedPiece;
 
-/// Returns the display color for a given piece index (0-6).
-///
-/// The mapping is stable to keep colors consistent across renders.
-fn piece_color(piece_index: usize) -> Color {
-    match piece_index {
-        0 => Color::new(1.0, 0.2, 0.2, 1.0), // red
-        1 => Color::new(0.2, 1.0, 0.2, 1.0), // green
-        2 => Color::new(0.2, 0.2, 1.0, 1.0), // blue
-        3 => Color::new(1.0, 1.0, 0.2, 1.0), // yellow
-        4 => Color::new(1.0, 0.2, 1.0, 1.0), // magenta
-        5 => Color::new(0.2, 1.0, 1.0, 1.0), // cyan
-        _ => Color::new(1.0, 0.6, 0.2, 1.0), // orange
-    }
+/// Returns a distinct color for a piece index by spacing hues evenly.
+fn piece_color(piece_index: usize, num_pieces: usize) -> Color {
+    let hue = (piece_index as f32) / (num_pieces as f32);
+
+    // HSL to RGB with saturation=0.8, lightness=0.5
+    let s: f32 = 0.8;
+    let l: f32 = 0.5;
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let h_prime = hue * 6.0;
+    let x = c * (1.0 - (h_prime % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+
+    let (r, g, b) = match h_prime as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    Color::new(r + m, g + m, b + m, 1.0)
 }
 
 /// Represents a rendered cube in the 3D scene.
@@ -26,56 +35,51 @@ struct RenderedCube {
     node: SceneNode3d,
     /// The cube's position when not exploded.
     base_position: Vec3,
-    /// Which piece this cube belongs to (0-6).
+    /// Which piece this cube belongs to (0-based).
     piece_index: usize,
 }
 
 /// Builds the 3D scene for a solution.
 ///
-/// Coordinate conventions:
-/// - Solver coordinates use integer x, y, z in 0..=2.
-/// - Rendered cubes map x->X, y->Y, z->Z in world units.
-/// - The grid is centered at the origin by offsetting positions by -1.0.
-///
-/// Returns the rendered cubes and a map of piece centroids for explosion animation.
-fn build_scene(
+/// Grid is centered at the origin by offsetting positions by -(DIM-1)/2.
+fn build_scene<const DIM: usize, const GRID_SIZE: usize>(
     scene: &mut SceneNode3d,
     solution: &[PlacedPiece],
+    num_pieces: usize,
 ) -> (Vec<RenderedCube>, std::collections::HashMap<usize, Vec3>) {
-    /// Size of each rendered cube (slightly smaller than 1.0 for visible gaps).
     const CUBE_SIZE: f32 = 0.9;
-    /// Spacing between grid cells.
     const CELL_SPACING: f32 = 1.0;
-    /// Offset to center the grid around the origin.
-    const CENTER_OFFSET: f32 = -1.0;
+    let center_offset: f32 = -((DIM as f32) - 1.0) / 2.0;
 
     // compute piece centroids for explosion animation
     let mut piece_centroids: std::collections::HashMap<usize, Vec3> =
         std::collections::HashMap::new();
-    for &(piece_index, cube_coords, cube_count) in solution {
-        let position_sum: Vec3 = cube_coords[..cube_count as usize]
+    for placed in solution {
+        let position_sum: Vec3 = placed
+            .cubes()
             .iter()
             .map(|&(x, y, z)| Vec3::new(x as f32, y as f32, z as f32))
             .fold(Vec3::ZERO, |acc, pos| acc + pos);
-        piece_centroids.insert(piece_index, position_sum / cube_count as f32);
+        piece_centroids.insert(placed.piece_index, position_sum / placed.cube_count as f32);
     }
 
-    let grid = solution_to_grid(solution);
+    let grid = solution_to_grid::<DIM, GRID_SIZE>(solution);
 
     let mut rendered_cubes = Vec::new();
-    for (x, yz_plane) in grid.iter().enumerate() {
-        for (y, z_row) in yz_plane.iter().enumerate() {
-            for (z, &piece_number) in z_row.iter().enumerate() {
+    for x in 0..DIM {
+        for y in 0..DIM {
+            for z in 0..DIM {
+                let piece_number = grid[x * DIM * DIM + y * DIM + z];
                 if piece_number > 0 {
                     let piece_index = (piece_number - 1) as usize;
                     let base_position = Vec3::new(
-                        x as f32 * CELL_SPACING + CENTER_OFFSET,
-                        y as f32 * CELL_SPACING + CENTER_OFFSET,
-                        z as f32 * CELL_SPACING + CENTER_OFFSET,
+                        x as f32 * CELL_SPACING + center_offset,
+                        y as f32 * CELL_SPACING + center_offset,
+                        z as f32 * CELL_SPACING + center_offset,
                     );
                     let node = scene
                         .add_cube(CUBE_SIZE, CUBE_SIZE, CUBE_SIZE)
-                        .set_color(piece_color(piece_index))
+                        .set_color(piece_color(piece_index, num_pieces))
                         .set_position(base_position);
                     rendered_cubes.push(RenderedCube {
                         node,
@@ -91,11 +95,17 @@ fn build_scene(
 }
 
 /// Displays all solutions in an interactive 3D viewer.
-pub fn display(solutions: Vec<Vec<PlacedPiece>>) {
-    pollster::block_on(display_async(solutions));
+pub fn display<const DIM: usize, const GRID_SIZE: usize>(
+    solutions: Vec<Vec<PlacedPiece>>,
+    num_pieces: usize,
+) {
+    pollster::block_on(display_async::<DIM, GRID_SIZE>(solutions, num_pieces));
 }
 
-async fn display_async(solutions: Vec<Vec<PlacedPiece>>) {
+async fn display_async<const DIM: usize, const GRID_SIZE: usize>(
+    solutions: Vec<Vec<PlacedPiece>>,
+    num_pieces: usize,
+) {
     if solutions.is_empty() {
         println!("No solutions to display");
         return;
@@ -105,77 +115,83 @@ async fn display_async(solutions: Vec<Vec<PlacedPiece>>) {
     let mut current_solution_index = 0;
 
     let mut window = Window::new(&format!(
-        "Solution 1/{} - [Left/Right] navigate, [Up/Down] explode, [R] reset",
+        "Solution 1/{} - [Left/Right] navigate, [W/S] explode, [R] reset",
         num_solutions
     ))
     .await;
 
     let mut camera = OrbitCamera3d::default();
-    camera.set_dist(8.0);
+    camera.set_dist(DIM as f32 * 2.5);
 
     let mut scene = SceneNode3d::empty();
     scene
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(5.0, 5.0, 5.0));
 
-    // center point in solver coordinates for explosion direction calculation
-    let grid_center = Vec3::new(1.0, 1.0, 1.0);
+    // keep center in solver coordinate space for explosion direction math
+    let grid_center_val = (DIM as f32 - 1.0) / 2.0;
+    let grid_center = Vec3::new(grid_center_val, grid_center_val, grid_center_val);
     let (mut rendered_cubes, mut piece_centroids) =
-        build_scene(&mut scene, &solutions[current_solution_index]);
+        build_scene::<DIM, GRID_SIZE>(&mut scene, &solutions[current_solution_index], num_pieces);
 
-    // how much to expand pieces outward (0.0 = compact, higher = more exploded)
     let mut explosion_amount: f32 = 0.0;
-    // speed at which explosion changes per keypress
     const EXPLOSION_SPEED: f32 = 0.05;
-    // whether the scene needs to be rebuilt (after solution change)
     let mut needs_rebuild = false;
+    let mut explode_in = false;
+    let mut explode_out = false;
 
     loop {
         for event in window.events().iter() {
             if let kiss3d::event::WindowEvent::Key(key, action, _) = event.value {
                 use kiss3d::event::{Action, Key};
-                if action == Action::Press {
-                    match key {
-                        Key::Up => explosion_amount += EXPLOSION_SPEED,
-                        Key::Down => {
-                            explosion_amount = (explosion_amount - EXPLOSION_SPEED).max(0.0)
-                        }
-                        Key::R => explosion_amount = 0.0,
-                        Key::Right => {
-                            current_solution_index = (current_solution_index + 1) % num_solutions;
-                            needs_rebuild = true;
-                        }
-                        Key::Left => {
-                            current_solution_index = current_solution_index
-                                .checked_sub(1)
-                                .unwrap_or(num_solutions - 1);
-                            needs_rebuild = true;
-                        }
-                        _ => {}
+                let pressed = action == Action::Press;
+                match key {
+                    // hold keys for smooth in and out motion
+                    Key::W => explode_out = pressed,
+                    Key::S => explode_in = pressed,
+                    Key::R if pressed => explosion_amount = 0.0,
+                    Key::Right if pressed => {
+                        current_solution_index = (current_solution_index + 1) % num_solutions;
+                        needs_rebuild = true;
                     }
+                    Key::Left if pressed => {
+                        current_solution_index = current_solution_index
+                            .checked_sub(1)
+                            .unwrap_or(num_solutions - 1);
+                        needs_rebuild = true;
+                    }
+                    _ => {}
                 }
             }
         }
 
+        if explode_out {
+            explosion_amount += EXPLOSION_SPEED;
+        }
+        if explode_in {
+            explosion_amount = (explosion_amount - EXPLOSION_SPEED).max(0.0);
+        }
+
         if needs_rebuild {
+            // rebuild cubes only when switching to a different solution
             for mut cube in rendered_cubes.drain(..) {
                 cube.node.remove();
             }
             let (new_cubes, new_centroids) =
-                build_scene(&mut scene, &solutions[current_solution_index]);
+                build_scene::<DIM, GRID_SIZE>(&mut scene, &solutions[current_solution_index], num_pieces);
             rendered_cubes = new_cubes;
             piece_centroids = new_centroids;
             window.set_title(&format!(
-                "Solution {}/{} - [Left/Right] navigate, [Up/Down] explode, [R] reset",
+                "Solution {}/{} - [Left/Right] navigate, [W/S] explode, [R] reset",
                 current_solution_index + 1,
                 num_solutions
             ));
             needs_rebuild = false;
         }
 
-        // update cube positions for explosion animation
         for cube in &mut rendered_cubes {
             let centroid = piece_centroids.get(&cube.piece_index).unwrap();
+            // move each piece away from center using its centroid direction
             let explosion_direction = (*centroid - grid_center).normalize_or_zero();
             cube.node.set_position(
                 cube.base_position + explosion_direction * explosion_amount * 2.0,
